@@ -38,7 +38,7 @@ from ...logging import get_logger
 from ...errors import OperationError
 
 from ... import aiotools
-from ... import aiomulti
+from ... import aioproc
 
 from ...htserver import HttpExposed
 from ...htserver import exposed_http
@@ -74,15 +74,14 @@ from .api.auth import check_request_auth
 from .api.info import InfoApi
 from .api.log import LogApi
 from .api.ugpio import UserGpioApi
+from .api.serial import SerialApi
 from .api.hid import HidApi
 from .api.atx import AtxApi
 from .api.msd import MsdApi
 from .api.streamer import StreamerApi
 from .api.switch import SwitchApi
 from .api.export import ExportApi
-from .api.redfish.root import RedfishRootApi
-from .api.redfish.atx import RedfishAtxApi
-from .api.redfish.msd import RedfishMsdApi
+from .api.redfish import RedfishApi
 
 
 # =====
@@ -106,7 +105,7 @@ class StreamerH264NotSupported(OperationError):
 class _Subsystem:
     name:          str
     event_type:    str
-    sysprep:       (Callable[[], Coroutine[Any, Any, None]] | None)
+    sysprep:       (Callable[[], None] | None)
     systask:       (Callable[[], Coroutine[Any, Any, None]] | None)
     cleanup:       (Callable[[], Coroutine[Any, Any, dict]] | None)
     trigger_state: (Callable[[], Coroutine[Any, Any, None]] | None) = None
@@ -146,10 +145,10 @@ class KvmdServer(HttpServer):  # pylint: disable=too-many-arguments,too-many-ins
 
     def __init__(  # pylint: disable=too-many-arguments,too-many-locals
         self,
-        auth: AuthManager,
-        im: InfoManager,
+        auth_manager: AuthManager,
+        info_manager: InfoManager,
         log_reader: (LogReader | None),
-        ugpio: UserGpio,
+        user_gpio: UserGpio,
         ocr: Ocr,
         switch: Switch,
 
@@ -159,8 +158,6 @@ class KvmdServer(HttpServer):  # pylint: disable=too-many-arguments,too-many-ins
         streamer: Streamer,
         snapshoter: Snapshoter,
 
-        allow_redirects: list[str],
-
         keymap_path: str,
 
         stream_forever: bool,
@@ -168,7 +165,7 @@ class KvmdServer(HttpServer):  # pylint: disable=too-many-arguments,too-many-ins
 
         super().__init__()
 
-        self.__auth = auth
+        self.__auth_manager = auth_manager
         self.__hid = hid
         self.__streamer = streamer
         self.__snapshoter = snapshoter  # Not a component: No state or cleanup
@@ -178,30 +175,29 @@ class KvmdServer(HttpServer):  # pylint: disable=too-many-arguments,too-many-ins
         self.__hid_api = HidApi(hid, keymap_path)  # Ugly hack to get keymaps state
         self.__apis: list[object] = [
             self,
-            AuthApi(auth, allow_redirects),
-            InfoApi(im),
+            AuthApi(auth_manager),
+            InfoApi(info_manager),
             LogApi(log_reader),
-            UserGpioApi(ugpio),
+            UserGpioApi(user_gpio),
             self.__hid_api,
             AtxApi(atx),
             MsdApi(msd),
             StreamerApi(streamer, ocr),
             SwitchApi(switch),
-            ExportApi(im, atx, ugpio),
-            RedfishRootApi(),
-            RedfishAtxApi(im, atx, switch),
-            RedfishMsdApi(msd),
+            ExportApi(info_manager, atx, user_gpio),
+            RedfishApi(info_manager, atx),
+            SerialApi(),
         ]
         self.__subsystems = [
-            _Subsystem.make(auth,     "Auth"),
-            _Subsystem.make(ugpio,    "GPIO",     self.__EV_GPIO_STATE),
-            _Subsystem.make(hid,      "HID",      self.__EV_HID_STATE),
-            _Subsystem.make(atx,      "ATX",      self.__EV_ATX_STATE),
-            _Subsystem.make(msd,      "MSD",      self.__EV_MSD_STATE),
-            _Subsystem.make(streamer, "Streamer", self.__EV_STREAMER_STATE),
-            _Subsystem.make(ocr,      "OCR",      self.__EV_OCR_STATE),
-            _Subsystem.make(im,       "Info",     self.__EV_INFO_STATE),
-            _Subsystem.make(switch,   "Switch",   self.__EV_SWITCH_STATE),
+            _Subsystem.make(auth_manager, "Auth manager"),
+            _Subsystem.make(user_gpio,    "User-GPIO",    self.__EV_GPIO_STATE),
+            _Subsystem.make(hid,          "HID",          self.__EV_HID_STATE),
+            _Subsystem.make(atx,          "ATX",          self.__EV_ATX_STATE),
+            _Subsystem.make(msd,          "MSD",          self.__EV_MSD_STATE),
+            _Subsystem.make(streamer,     "Streamer",     self.__EV_STREAMER_STATE),
+            _Subsystem.make(ocr,          "OCR",          self.__EV_OCR_STATE),
+            _Subsystem.make(info_manager, "Info manager", self.__EV_INFO_STATE),
+            _Subsystem.make(switch,       "Switch",       self.__EV_SWITCH_STATE),
         ]
 
         self.__streamer_notifier = aiotools.AioNotifier()
@@ -269,16 +265,14 @@ class KvmdServer(HttpServer):  # pylint: disable=too-many-arguments,too-many-ins
     # ===== SYSTEM STUFF
 
     def run(self, **kwargs: Any) -> None:  # type: ignore  # pylint: disable=arguments-differ
-        aiomulti.rename_process("main")
+        for sub in self.__subsystems:
+            if sub.sysprep:
+                sub.sysprep()
+        aioproc.rename_process("main")
         super().run(**kwargs)
 
     async def _check_request_auth(self, exposed: HttpExposed, req: Request) -> None:
-        await check_request_auth(self.__auth, exposed, req)
-
-    async def _before_app(self) -> None:
-        for sub in self.__subsystems:
-            if sub.sysprep:
-                await sub.sysprep()
+        await check_request_auth(self.__auth_manager, exposed, req)
 
     async def _init_app(self) -> None:
         aiotools.create_deadly_task("Stream controller", self.__stream_controller())
@@ -313,12 +307,12 @@ class KvmdServer(HttpServer):  # pylint: disable=too-many-arguments,too-many-ins
         logger.info("On-Cleanup complete")
 
     def _on_ws_added(self, ws: WsSession) -> None:
-        self.__auth.start_ws_session(ws.token)
+        self.__auth_manager.start_ws_session(ws.token)
         self.__hid.clear_events()
         self.__streamer_notifier.notify()
 
     def _on_ws_removed(self, ws: WsSession) -> None:
-        self.__auth.stop_ws_session(ws.token)
+        self.__auth_manager.stop_ws_session(ws.token)
         self.__hid.clear_events()
         self.__streamer_notifier.notify()
 
@@ -333,11 +327,8 @@ class KvmdServer(HttpServer):  # pylint: disable=too-many-arguments,too-many-ins
     async def __stream_controller(self) -> None:
         prev = False
         while True:
-            clients = self.__get_stream_clients()
-            await self._broadcast_ws_event(self.__EV_CLIENTS_STATE, {"count": clients})  # FIXME
-
             cur = (
-                bool(clients)
+                bool(self.__get_stream_clients())
                 or self.__snapshoter.snapshoting()
                 or self.__stream_forever
             )
@@ -345,11 +336,8 @@ class KvmdServer(HttpServer):  # pylint: disable=too-many-arguments,too-many-ins
                 await self.__streamer.ensure_start()
             elif prev and not cur:
                 await self.__streamer.ensure_stop()
-            prev = cur
 
             if self.__new_streamer_params:
-                if (await self.__streamer_notifier.wait(timeout=1)) >= 0:
-                    continue
                 self.__streamer.set_params(self.__new_streamer_params)
                 self.__new_streamer_params = {}
                 self.__reset_streamer = True
@@ -358,11 +346,13 @@ class KvmdServer(HttpServer):  # pylint: disable=too-many-arguments,too-many-ins
                 await self.__streamer.ensure_restart()
                 self.__reset_streamer = False
 
+            prev = cur
+            await self._broadcast_ws_event(self.__EV_CLIENTS_STATE, {"count": self.__get_stream_clients()})  # FIXME
             await self.__streamer_notifier.wait()
 
     async def __stream_snapshoter(self) -> None:
         await self.__snapshoter.run(
-            is_live=(lambda: bool(self.__get_stream_clients())),
+            is_live=(lambda: bool(self.__get_stream_clients)),
             notifier=self.__streamer_notifier,
         )
 
