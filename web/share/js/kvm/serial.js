@@ -1,0 +1,20 @@
+function change_port(port) {
+    fetch('/api/serial?port=' + port)
+    document.getElementById('1').style.backgroundColor = 'var(--cs-control-default-bg)'
+    document.getElementById('2').style.backgroundColor = 'var(--cs-control-default-bg)'
+    document.getElementById('3').style.backgroundColor = 'var(--cs-control-default-bg)'
+    document.getElementById('4').style.backgroundColor = 'var(--cs-control-default-bg)'
+    document.getElementById('5').style.backgroundColor = 'var(--cs-control-default-bg)'
+    document.getElementById('6').style.backgroundColor = 'var(--cs-control-default-bg)'
+    document.getElementById('7').style.backgroundColor = 'var(--cs-control-default-bg)'
+    document.getElementById('8').style.backgroundColor = 'var(--cs-control-default-bg)'
+        document.getElementById('9').style.backgroundColor = 'var(--cs-control-default-bg)'
+    document.getElementById('10').style.backgroundColor = 'var(--cs-control-default-bg)'
+    document.getElementById('11').style.backgroundColor = 'var(--cs-control-default-bg)'
+    document.getElementById('12').style.backgroundColor = 'var(--cs-control-default-bg)'
+    document.getElementById('13').style.backgroundColor = 'var(--cs-control-default-bg)'
+    document.getElementById('14').style.backgroundColor = 'var(--cs-control-default-bg)'
+    document.getElementById('15').style.backgroundColor = 'var(--cs-control-default-bg)'
+    document.getElementById('16').style.backgroundColor = 'var(--cs-control-default-bg)'
+    document.getElementById(port).style.backgroundColor = '#2c3343'
+}
